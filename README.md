@@ -1,2 +1,2 @@
 # Curs_Bioinformatica_2023
-materials pel curs de Bioinformàtica VHIR-UEB 2023
+Repositori per a les presentacions i materials del curs de Bionformatica 2023
