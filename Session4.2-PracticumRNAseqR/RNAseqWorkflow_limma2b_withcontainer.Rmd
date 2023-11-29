@@ -1,0 +1,499 @@
+---
+title: "RNA-seq differential expression analysis workflow"
+author: "UEB"
+date: "November 2023"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: 
+      collapsed: true
+      smooth_scroll: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,message=FALSE, warning=FALSE)
+```
+
+
+This material has been created using the following sources:  
+
+* https://combine-australia.github.io/RNAseq-R/
+
+* https://www.bioconductor.org/packages/release/workflows/vignettes/RNAseq123/inst/doc/limmaWorkflow.html
+
+
+# Before starting
+
+## Set directories
+
+Create a directory for the practicum named "PracticumRNAseq" and a subfolder named "data" where you will place all the files needed for the analysis. 
+
+Set the working directory to the folder `PracticumRNAseq`.
+
+## Installation of packages
+
+Install Bioconductor (https://www.bioconductor.org/install/):
+
+```{r eval=FALSE}
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# BiocManager::install(version = "3.12")
+```
+
+Packages from Bioconductor can be installed with `BiocManager::install("pkg")` function, where "pkg" is the package to be installed.
+
+The following packages will be used in this workflow:
+
+* `Rsubread` package: provides tools for alignment and quantification of reads
+* `edgeR` package: provides tools for pre-pocessing and visualizing counts data
+* `limma` package: provides tools for differential expression analysis
+* `pheatmap` package: provides tools for plotting heatmaps
+
+```{r eval=FALSE}
+# BiocManager::install("Rsubread")
+# BiocManager::install("edgeR")
+# BiocManager::install("limma")
+# BiocManager::install("pheatmap")
+```
+
+We can now load the packages
+
+```{r}
+library(Rsubread)
+library(edgeR)
+library(limma)
+library(pheatmap)
+```
+
+# Data for the analysis
+
+## Mouse mammary gland dataset
+
+The data for this tutorial comes from a Nature Cell Biology paper, [*EGF-mediated induction of Mcl-1 at the switch to lactation is essential for alveolar cell survival*](http://www.ncbi.nlm.nih.gov/pubmed/25730472) (Fu et al 2015). Both the raw data (sequence reads) and processed data (counts) are available for downloaded from Gene Expression Omnibus database (GEO) under accession number [GSE60450](http://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE60450).
+
+This study examines the expression profiles of basal stem-cell enriched cells (B) and committed luminal cells (L) in the mammary gland of virgin, pregnant and lactating mice. Six groups are present, with one for each combination of cell type and mouse status. Each group contains two biological replicates.
+
+## Files
+
+The following files are provided, which can be downloaded into the `data` directory:
+
+* _SampleInfo.txt_: contains sample information
+* 4 files _.bam_: contain the alignment results for 4 of the samples (demo dataset)
+* _GSE60450_Lactation-GenewiseCounts.txt_: contains the counts matrix of the whole dataset
+
+## Reading in Sample information
+
+The _SampleInfo.txt_ file contains basic information about the samples:
+
+```{r loadSampleInfo}
+# Read the sample information into R
+sampleinfo <- read.delim("./data/SampleInfo.txt")
+sampleinfo
+```
+
+# Quantification of aligned reads: obtaining the counts matrix (demo)
+
+The alignment produces a set of BAM files, where each file contains the read alignments for each library. In the BAM file, there is a chromosomal location for every read that mapped to that position. For demonstration purposes, we’re only using a subset of 1000 reads per sample, aligned to the chromosome 1 of the mouse genome. 
+
+We will use the `Rsubread` package, which provides functions for read mapping and quantification.
+
+```{r}
+library(Rsubread)
+```
+
+```{r}
+bam.files <- list.files(path = "./data", pattern = ".BAM$", full.names = TRUE)
+bam.files
+```
+
+We can see the proportion of reads that were mapped to chromosome 1:
+
+```{r}
+props <- propmapped(files=bam.files)[,1:2]
+props
+```
+
+The mapped reads can be counted across mouse genes by using the featureCounts function. featureCounts contains built-in annotation for mouse (mm9, mm10) and human (hg19) genome assemblies (NCBI refseq annotation).
+
+The code below uses the exon intervals defined in the NCBI refseq annotation of the mm10 genome. Reads that map to exons of genes are added together to obtain the count for each gene, with some care taken with reads that span exon-exon boundaries. We will use the default settings in `featureCounts()` function. 
+
+Check the default settings using the help:
+
+```{r eval=FALSE}
+?featureCounts
+```
+
+Are multimapping reads counted? If a read overlaps two exons, is it counted twice?
+
+`featureCounts` takes all the BAM files as input, and outputs an object which includes the count matrix. Each sample is a separate column, each row is a gene.
+
+```{r}
+fc <- featureCounts(bam.files, annot.inbuilt="mm10")
+```
+
+```{r}
+# See what slots (fields) are stored in fc
+names(fc)
+```
+
+The statistics of the read mapping can be seen with fc$stats. This reports the numbers of unassigned reads and the reasons why they are not assigned (eg. ambiguity, multi-mapping,...), in addition to the number of successfully assigned reads for each library. (We know the real reason why the majority of the reads aren’t mapping - they’re not from chr 1!)
+
+```{r}
+## Take a look at the featurecounts stats
+fc$stat
+```
+
+Annotations used for summarizing reads to gene-level:
+
+```{r}
+head(fc$annotation)
+```
+
+The counts for the samples are stored in fc$counts. Take a look at that.
+
+```{r}
+## Take a look at the dimensions to see the number of genes
+dim(fc$counts)
+## Take a look at the first 6 lines
+head(fc$counts)
+counts_chr1 <- fc$counts
+```
+
+Save the counts matrix into a text file.
+
+```{r}
+write.table(counts_chr1, "counts_chr1.txt")
+```
+
+**Challenge**
+
+Redo the counting over the exons, rather than the genes (specify `useMetaFeatures = FALSE`), and call the `featureCounts` object `fc.exon`. Check the dimension of the counts matrix. Any differences?
+
+# Import the original counts matrix
+
+The count matrix for the whole dataset can be downloaded from the [GEO website](http://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE60450) and is contained in file _GSE60450_Lactation-GenewiseCounts.txt_.
+
+Let's take a look at the data. 
+
+```{r loadData}
+# Read the data into R
+seqdata <- read.delim("./data/GSE60450_Lactation-GenewiseCounts.txt", stringsAsFactors = FALSE)
+dim(seqdata)
+head(seqdata)
+```
+
+The `seqdata` object contains information about genes (one gene per row), the first column has the Entrez gene id, the second has the gene length and the remaining columns contain information about the number of reads aligning to the gene in each experimental sample. 
+
+## Format the data
+
+We will be manipulating and reformating the counts matrix into a suitable format for downstream analysis. We need to make a new matrix containing only the counts, but we can store the gene identifiers (the `EntrezGeneID` column) as rownames.
+
+Let's create a new data object, `countdata`, that contains only the counts for the 12 samples.  
+
+```{r createCountMatrix}
+# Remove first two columns from seqdata
+countdata <- seqdata[,-(1:2)]
+# Store EntrezGeneID as rownames
+rownames(countdata) <- seqdata$EntrezGeneID
+```
+
+Now take a look at the column names
+
+```{r colNames}
+colnames(countdata)
+```
+
+These are the file names for each sample, which are pretty long. We will rename the columns with the SampleNames stored in the `sampleinfo` dataframe. We first need to verify they are in the same order (this is very important!):
+
+```{r modifyColNames}
+all.equal(colnames(countdata), sampleinfo$FileName)
+```
+
+Then we can assign the new names:
+
+```{r}
+colnames(countdata) <- sampleinfo$SampleName
+head(countdata)
+```
+
+# Data pre-processing and exploratory analysis
+
+## Filtering to remove lowly expressed genes
+
+Genes with very low counts across all libraries provide little evidence for differential expression and they interfere with some of the statistical approximations that are used later in the pipeline. They also add to the multiple testing burden when estimating false discovery rates, reducing power to detect differentially expressed genes. These genes should be filtered out prior to further analysis.
+
+Filtering is performed on CPMs rather than filtering on the counts directly, as the latter does not account for differences in library sizes between samples. Here raw counts are normalised for the different sequencing depths (library sizes) for each sample and  converted to counts-per-million (CPM) values using the `cpm()` function in `edgeR`. In this dataset, we choose to retain genes if they are expressed at a CPM above 0.5 in at least two samples. 
+
+```{r librarySizes}
+colSums(countdata)
+```
+
+
+```{r getCPM}
+# Obtain CPMs
+counts.CPM <- cpm(countdata)
+# Have a look at the output
+head(counts.CPM)
+```
+
+```{r subsetThreshold}
+# Which values in myCPM are greater than 0.5?
+thresh <- counts.CPM > 0.5
+# This produces a logical matrix with TRUEs and FALSEs
+head(thresh)
+```
+
+```{r subsetMatrix}
+# we would like to keep genes that have at least 2 TRUES in each row of thresh
+keep <- rowSums(thresh) >= 2
+# Subset the rows of countdata to keep the more highly expressed genes
+counts.keep <- countdata[keep,]
+dim(countdata)
+dim(counts.keep)
+```
+
+## Convert counts to DGEList object
+
+Next we'll create a `DGEList` object. This is an object used by *edgeR* to store count data. It has a number of slots for storing various parameters about the data.
+
+```{r makeDGEObj}
+dgeObj <- DGEList(counts.keep)
+# have a look at dgeObj
+dgeObj
+# See what slots are stored in dgeObj
+names(dgeObj)
+# Library size information is stored in the samples slot
+dgeObj$samples
+```
+
+Now that we have got rid of the lowly expressed genes and have our counts stored in a `DGEList` object, we can look at a few different plots to check that the data is good quality, and that the samples are as we would expect.
+
+## Boxplot of the unnormalized counts
+
+Count data is not normally distributed, so if we want to examine the distributions of the raw counts we need to log the counts. Next we'll use box plots to check the distribution of the read counts on the log2 scale. We can use the `cpm` function to get log2 counts per million, which are corrected for the different library sizes. The `cpm` function also adds a small offset to avoid taking log of zero.
+
+```{r}
+# Get log2 counts per million
+logcounts <- cpm(dgeObj,log=TRUE)
+# Check distributions of samples using boxplots
+boxplot(logcounts, ylab="Log2-CPM",las=2, xlab="", main="Boxplots of logCPMs (unnormalised)")
+# Let's add a blue horizontal line that corresponds to the median logCPM
+abline(h=median(logcounts), col="blue")
+```
+
+From the boxplots we see that overall the density distributions of raw log-intensities are not identical but still not very different. If a sample is really far above or below the blue horizontal line we may need to investigate that sample further.
+
+## Normalization
+
+TMM normalization is performed to eliminate composition biases between libraries (Mark D. Robinson and Oshlack 2010). This generates a set of normalization factors, where the product of these factors and the library sizes defines the effective library size. The calcNormFactors function calculates the normalization factors between libraries.
+
+```{r calcNormFactors}
+# Apply normalisation to DGEList object
+dgeObj_norm <- calcNormFactors(dgeObj)
+```
+
+This will update the normalisation factors in the `DGEList` object (their default values are 1).
+
+```{r}
+dgeObj_norm
+```
+
+```{r}
+# Get log2 counts per million
+logcounts_norm <- cpm(dgeObj_norm,log=TRUE)
+# Check distributions of samples using boxplots
+boxplot(logcounts_norm, ylab="Log2-CPM",las=2, xlab="", main="Boxplots of logCPMs (normalised)")
+# Let's add a blue horizontal line that corresponds to the median logCPM
+abline(h=median(logcounts_norm), col="blue")
+```
+
+
+## Hierarchical clustering of sample distances
+
+To determine whether the different sample types can be separated in an unsupervised fashion (i.e., samples of different conditions are more dissimilar to each other than replicates within the same condition), hierarchical clustering can be used. Hierarchical clustering is typically based on pairwise comparisons of individual samples, which are grouped into “neighborhoods” of similar samples. The basis of hierarchical clustering is therefore a matrix of similarity metrics. 
+
+```{r}
+sampleDists <- dist(t(logcounts_norm))
+sampleDists
+plot(hclust(sampleDists),labels = colnames(logcounts_norm),main = "Dendogram of sample distances")
+```
+
+
+## Principal Component Analysis (PCA)
+
+A complementary approach to determine the main sources of variability in the data is principal components analysis (PCA). It is a typical example  of  dimensionality  reduction  approaches  that aims to find groups of features (e.g., genes) that have something in common (e.g., certain patterns of expression across different samples), so that the information from thousands of features is captured and represented by a reduced number of groups.The result of PCA are principal components that represent the directions along which the variation in the original multi-dimensional data matrix is maximal. This way a few dimensions (components) can be used to represent the information from thousands of mRNAs. This allows us to, for example, visually represent the variation of the gene expression for different samples by using just the top two principal components (PCs) as coordinates in a  simple  xy  plot  (instead  of  plotting  thousands  of  genes  per  sample).  
+
+We can use the `plotMDS` function to create the such a plot.
+
+```{r plotMDSbasic}
+plotMDS(logcounts_norm)
+```
+
+It is a bit difficult to see exactly what is going on with the default plot, although we do see samples grouping together in pairs. To make this plot more informative, we can colour the samples according to the grouping information (eg. Status):
+
+```{r}
+sampleinfo$Status <- factor (sampleinfo$Status)
+col.status <- c("blue","red","dark green")[sampleinfo$Status]
+data.frame(sampleinfo$Status,col.status)
+plotMDS(logcounts_norm,col=col.status, main="Status")
+# Let's add a legend to the plot so we know which colours correspond to which cell type
+legend("topleft",fill=c("blue","red","dark green"),legend=levels(sampleinfo$Status))
+```
+
+**Challenge**
+
+* What component separates samples by _Status_?
+
+
+* Repeat the MDS plot coloring by CellType condition. Is there something strange going on with the samples?
+
+* Identify the two samples that don't appear to be in the right place.
+
+Solution
+
+```{r}
+# Redo the MDS with cell type colouring
+## Let's choose purple for basal and orange for luminal
+sampleinfo$CellType <- factor(sampleinfo$CellType)
+col.cell <- c("purple","orange")[sampleinfo$CellType]
+data.frame(sampleinfo$CellType,col.cell)
+plotMDS(logcounts_norm,col=col.cell, main="Cell type")
+# Let's add a legend to the plot so we know which colours correspond to which cell type
+legend("topleft",fill=c("purple","orange"),legend=levels(sampleinfo$CellType))
+```
+
+## Correcting the sample info 
+
+Both the hierarchical clustering and MDS plots suggest that two samples may be mislabelled. We can correct now the sampleinfo file with this new information.
+
+```{r}
+sampleinfo$CellType[1] <- "basal"
+sampleinfo$CellType[7] <- "luminal"
+```
+
+```{r plotMDSfixed, fig.height=5, fig.width=10}
+# Redo the MDSplot with corrected information
+par(mfrow=c(1,2))
+col.cell <- c("purple","orange")[sampleinfo$CellType]
+col.status <- c("blue","red","dark green")[sampleinfo$Status]
+
+plotMDS(logcounts_norm,col=col.cell, main="Cell type")
+legend("topleft",fill=c("purple","orange"),legend=levels(sampleinfo$CellType))
+
+plotMDS(logcounts_norm,col=col.status, main="Status")
+legend("topleft",fill=c("blue","red","dark green"),legend=levels(sampleinfo$Status))
+```
+
+
+# Differential expression analysis with limma-voom
+
+Now that we are happy that we have normalised the data and that the quality looks good, we can continue to testing for differentially expressed genes. There are a number of packages to analyse RNA-Seq data. The `limma package` (Ritchie et al. 2015) offers the `voom` function, which transforms the read counts into logCPMs while taking into account the mean-variance relationship in the data (Charity W. Law et al. 2014). After vooming, users can apply a linear model to the voom-transformed data to test for differentially expressed genes,  with the assumption that the underlying data is normally distributed.
+
+## Creating a design matrix and contrasts
+
+First we need to create a design matrix for the groups of interest that we want to test. In this analysis let’s assume that we will be testing differences in status in the different cell types separately. For example, we want to know which genes are differentially expressed between pregnant and lactating in basal cells only. We will code the `group` variable as a concatenation of cell type and status. Coding the cell type and status in this way allows us to be flexible in specifying which comparisons we are interested in.
+
+Each column of the design matrix tells us which samples correspond to each group.
+
+```{r}
+group <- paste(sampleinfo$CellType, sampleinfo$Status, sep=".")
+design <- model.matrix(~0+group)
+colnames(design) <- gsub("group", "", colnames(design))
+rownames(design) <- sampleinfo$SampleName
+design
+```
+
+Since we are interested in differences between groups, we need to specify which comparisons we want to test. The comparison of interest can be specified using the `makeContrasts` function. The contrast matrix tells limma which columns of the design matrix we are interested in testing our comparison.
+
+Here, we are interested in knowing which genes are differentially expressed between the pregnant and lactating group in the basal cells. This is done by defining the null hypothesis as basal.pregnant - basal.lactate = 0 for each gene. Note that the group names must exactly match the column names of the design matrix.
+
+```{r}
+cont.matrix <- makeContrasts(B.PregVsLac=basal.pregnant - basal.lactate, levels=design)
+cont.matrix
+```
+
+## Voom-transformation of the data
+
+```{r}
+voomObj <- voom(dgeObj_norm,design)
+voomObj
+```
+
+## Testing for differential expression
+
+Now that we have the voom transformed data we can use `limma` to test for differential expression. First we fit a linear model for each gene using the `lmFit` function in `limma` package. `lmFit` needs the voom object and the design matrix that we have already specified, which is stored within the voom object.
+
+```{r}
+# Fit the linear model
+fit <- lmFit(voomObj)
+```
+
+Now we can apply the contrasts matrix to the fit object to get the statistics and estimated parameters of our comparison that we are interested in. Here we call the contrasts.fit function in limma. The final step is to call the eBayes function, which performs empirical Bayes shrinkage on the variances, and estimates moderated t-statistics and the associated p-values.
+
+```{r}
+fit.cont <- contrasts.fit(fit, cont.matrix)
+fit.cont <- eBayes(fit.cont)
+```
+
+## Top tables
+
+The results of a differentially expression analysis can be extracted with `topTable` function:
+
+* The logFCcolumn gives the log2-fold change in expression of a gene between the two groups tested
+* The AveExpr column  gives  the  average  log2-expression  level  for  that  gene  across  all  the samples in the experiment. 
+* Column t is the moderated t-statistic. 
+* Column P.Value is the associated p-value
+* adj.P.Value is thep-value adjusted for multiple testing. The most popular form of adjustment is “BH” which is Benjamini and Hochberg’s method to control thefalse discovery rate. 
+* The B-statistic is the log-odds that the gene is differentially expressed
+
+```{r}
+toptab_B.PregVsLac <- topTable(fit.cont,coef=1,sort.by="p", number=nrow(fit.cont))
+head(toptab_B.PregVsLac)
+```
+
+Save the top table as a csv file:
+
+```{r}
+write.csv(toptab_B.PregVsLac, "toptab_B.PregVsLac.csv")
+```
+
+## Visualization of results
+
+We can use the limma `decideTests` function to generate a quick summary of DE genes below an adjusted p-value of 0.05 for the contrast tested.
+
+```{r}
+summa.fit <- decideTests(fit.cont)
+summary(summa.fit)
+```
+
+### Volcano plot
+
+A common visualisation is the [*volcano plot*](https://en.wikipedia.org/wiki/Volcano_plot_(statistics)) which display a measure of significance on the y-axis and fold-change on the x-axis. 
+
+```{r}
+volcanoplot(fit.cont,coef=1,highlight=100,names=fit.cont$genes$SYMBOL, main="B.PregVsLac")
+```
+
+
+### Heatmap of the top differentially expressed genes
+
+The expression profiles obtained for the top differentially expressed genes can be plotted in a heatmap, with genes (rows) and samples (columns) grouped by similarity.
+
+```{r}
+library("pheatmap")
+topGenes <- rownames(toptab_B.PregVsLac)[1:50]
+head(topGenes)
+sampleinfo1 <- subset(sampleinfo, CellType=="basal")
+mat  <- logcounts_norm[topGenes, sampleinfo1$SampleName]
+mat  <- mat - rowMeans(mat)
+anno <- sampleinfo1[, c("CellType","Status")]
+rownames(anno) <- sampleinfo1$SampleName
+pheatmap(mat, annotation_col = anno)
+```
+
+
+**Challenge**
+
+Re-run the code above to test for differences between luminal.pregnant and luminal.lactate groups.
