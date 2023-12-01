@@ -1,0 +1,234 @@
+---
+title: "Practicum Enrichment Analysis"
+author: "UEB"
+date: "February 2022"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: 
+      collapsed: true
+      smooth_scroll: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,message=FALSE, warning=FALSE)
+```
+
+This material has been created using the following resource:
+
+* https://yulab-smu.top/biomedical-knowledge-mining-book/enrichment-overview.html
+
+# Packages
+
+```{r eval=FALSE}
+BiocManager::install("clusterProfiler")
+BiocManager::install("enrichplot")
+BiocManager::install("org.Mm.eg.db") #organism annotation package
+BiocManager::install("AnnotationDbi") #package for adding annotations
+```
+
+
+We can now load the packages
+
+```{r}
+library(clusterProfiler)
+library(enrichplot)
+library(org.Mm.eg.db)
+library(AnnotationDbi)
+```
+
+# Load data
+
+We will be using the results from differential expression analysis performed on RNA-seq data from the Mouse mammary gland dataset obtained in previous session.
+
+First we need to import the topTable of interest (eg. _toptab_B.PregVsLac.csv_):
+
+```{r}
+toptab <- read.csv(file="toptab_B.PregVsLac.csv", header=TRUE, stringsAsFactors=FALSE)
+head(toptab)
+#In this toptable, first column corresponds to the Entrez id.
+colnames(toptab)[1] <- "entrez"
+rownames(toptab) <- toptab$entrez
+head(toptab)
+```
+
+# Annotation
+
+```{r}
+#available annotations
+columns(org.Mm.eg.db)
+
+#convert from Entrez id to Gene Symbol
+entrez.str <- rownames(toptab)
+toptab$symbol <- mapIds(org.Mm.eg.db,
+                     keys=entrez.str,
+                     column="SYMBOL",
+                     keytype="ENTREZID",
+                     multiVals="first")
+sum(is.na(toptab$symbol))
+toptab <- subset(toptab, !is.na(symbol))
+head(toptab)
+
+#Save annotated toptab
+write.csv(toptab, file="toptab_B.PregVsLac_annot.csv")
+```
+
+**Challenge**: annotate genes with their UniProt accession number.
+
+# Overrepresentation analysis using clusterProfiler
+
+## Preparation of the gene list
+
+We will perform an overrepresentation analysis of the top **up**-regulated genes differentially expressed in `B.PregVsLac` comparison, with the following thresholds: adjusted p-value below 0.05 and logFC above 2.
+
+```{r}
+UPgenes <- subset(toptab, adj.P.Val < 0.05 & logFC > 2)
+dim(UPgenes)
+head(UPgenes)
+#Save subsetted toptab of upregulated genes
+write.csv(UPgenes, file="toptab_B.PregVsLac_annot_up.csv")
+```
+
+```{r}
+selgenes <- as.character(UPgenes$entrez)
+head(selgenes)
+```
+
+## Gene Ontology (GO) enrichment analysis
+
+GO enrichment analysis can be performed using `enrichGO` function from `clusterProfiler` package. We will perform the analysis over the Biological Process (BP) GO category.
+
+```{r}
+
+## Run GO enrichment analysis 
+ego <- enrichGO(gene = selgenes, 
+                # universe = all_genes,
+                keyType = "ENTREZID",
+                OrgDb = org.Mm.eg.db, 
+                ont = "BP", 
+                pAdjustMethod = "BH", 
+                qvalueCutoff = 0.05, 
+                readable = TRUE)
+head(ego)
+# Output results from GO analysis to a table
+ego_results <- data.frame(ego)
+
+write.csv(ego_results, "clusterProfiler_ORAresults_UpGO.csv")
+```
+
+### Visualization of enrichment results
+
+**Dotplot of top 10 enriched terms**
+
+```{r} 
+dotplot(ego, showCategory=10)
+```
+
+**Visualization of GO terms in hierarchy**
+
+Enriched GO terms can be visualized as a directed acyclic graph (only for GO):
+
+```{r}
+goplot(ego, showCategory=10)
+```
+
+**Gene network for the top terms**
+
+```{r}
+cnetplot(ego) 
+```
+
+**Enrichment Map**
+
+Enriched terms can be grouped by some similarity measure (eg. overlap of genes between terms) to summarize the results.
+
+```{r}
+## Enrichmap clusters the 50 most significant (by adj.P.Va) GO terms to visualize relationships between terms
+library(enrichplot)
+ego_sim <- pairwise_termsim(ego)
+emapplot(ego_sim, cex_label_category=0.5)
+```
+
+**Note:**
+
+For overrepresentation analysis based on **Reactome Pathways** database one can use function `enrichPathway` from `ReactomePA` package.
+
+**Challenge 1**: perform an overrepresentation analysis of the top down-regulated genes with a logFC < -2 and adjusted p-value < 0.05 over the GO-BP ontology.
+
+**Challenge 2**: what molecular functions are enriched among the top up/down-regulated genes selected?
+
+**Challenge 3**: perform an overrepresentation analysis of the top up/down-regulated genes over the Reactome Pathway database.
+
+
+# Gene Set Enrichment Analysis (GSEA)
+
+## Preparation of a ranked gene list
+
+We can rank genes by their logFC so that most up/down-regulated genes will be at the top/bottom of the list, respectively.
+
+```{r}
+genelist <- toptab$logFC
+names(genelist) <- as.character(toptab$entrez)
+sum(is.na(genelist))
+length(genelist)
+#sort in decreasing order
+genelist <- sort(genelist, decreasing=TRUE)
+head(genelist)
+tail(genelist)
+```
+
+## GSEA over GO-BP ontology
+
+To run the GSEA analysis we will use `gseGO` function from `clusterProfiler` package.
+
+```{r}
+gsea_go <- gseGO(geneList=genelist, 
+                 keyType = "ENTREZID",
+                 OrgDb = org.Mm.eg.db, 
+                 ont = "BP", 
+                 pAdjustMethod = "none", 
+                 pvalueCutoff = 1, 
+                 by = "fgsea")
+head(gsea_go)
+gsea_go_results <- data.frame(gsea_go)
+write.csv(gsea_go_results, "GSEAresults_GOBP_B.PregVsLac.csv", row.names=FALSE)
+```
+
+```{r}
+require(ReactomePA)
+gsea_reactome <- gsePathway(genelist, 
+                                  pAdjustMethod = "none", 
+                                  pvalueCutoff  = 1, 
+                                  verbose = TRUE,
+                                  seed = TRUE,
+                                  organism = "mouse")
+head(gsea_reactome)
+gsea_reactome_results <- data.frame(gsea_reactome)
+write.csv(gsea_reactome_results, "GSEAresults_ReactomePA_B.PregVsLac.csv", row.names=FALSE)
+```
+
+
+### Visualization of results
+
+**Dotplot**
+
+```{r}
+library(DOSE)
+dotplot(gsea_go, showCategory=10, font.size=8, split=".sign") + facet_grid(.~.sign)
+```
+
+**GSEA plot**
+
+The following plot shows the Running Enrichment Score obtained for the first gene set, as an example:
+
+```{r}
+gseaplot(gsea_go, title=gsea_go$Description[1], geneSetID=1)
+```
+
+**Challenge 1**: perform an Enrichment Map with the results of GSEA analysis.
+
+**Challenge 2**: perform a GSEA analysis for the comparison performed in luminal cells.
+
+**Challenge 3**: which function can be used to perform a GSEA analysis over Reactome Pathway database?
